@@ -7,6 +7,8 @@ Transform your Ansible playbook output into beautiful console output
 - Beautiful colorized output
 - Compact, readable format
 - Role grouping to organize tasks by role
+- Shows what `debug` tasks print, including looped ones and `var`
+- Says plainly when a run failed
 
 | Before (Default Ansible) | After (Prettified) |
 |:-------------------------:|:------------------:|
