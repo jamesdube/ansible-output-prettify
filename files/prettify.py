@@ -2,6 +2,7 @@
 Ansible callback plugin for beautiful Laravel Artisan-style output
 """
 
+import json
 import os
 import time
 import sys
@@ -44,6 +45,13 @@ class CallbackModule(CallbackBase):
     LONGEST_STATUS = 7          # "SKIPPED" or "CHANGED"
     PREFIX_SPACE = 6            # "  ✓ " + " "
     MIN_DOTS = 3
+
+    # A debug task exists to say something, so its message is shown under it
+    DEBUG_ACTIONS = ('debug', 'ansible.builtin.debug', 'ansible.legacy.debug')
+    DEBUG_INDENT = '      '
+    # Keys of a debug result that are bookkeeping, not what the task said
+    DEBUG_BOOKKEEPING = ('changed', 'failed', 'skipped', 'skip_reason', 'item', 'ansible_loop_var',
+                         'invocation', 'warnings', 'deprecations', 'exception', 'results', 'false_condition')
 
     def __init__(self):
         super(CallbackModule, self).__init__()
@@ -328,6 +336,42 @@ class CallbackModule(CallbackBase):
             self._print_result(result, 'changed')
         else:
             self._print_result(result, 'success')
+        self._print_debug_output(result)
+
+    def _as_lines(self, value):
+        """A value as lines of text; anything that is not a string is shown as JSON"""
+        if not isinstance(value, str):
+            value = json.dumps(value, indent=2, default=str, ensure_ascii=False)
+        return value.splitlines() or ['']
+
+    def _debug_lines(self, entry):
+        """What one debug result said, as lines of text"""
+        if not isinstance(entry, dict) or entry.get('skipped') or 'censored' in entry:
+            return []
+        if 'msg' in entry:
+            return self._as_lines(entry['msg'])
+        # debug with var: the result is keyed by the name of the variable
+        lines = []
+        for key, value in entry.items():
+            if key.startswith('_') or key in self.DEBUG_BOOKKEEPING:
+                continue
+            shown = self._as_lines(value)
+            if len(shown) == 1:
+                lines.append(f"{key}: {shown[0]}")
+            else:
+                lines.append(f"{key}:")
+                lines.extend(f"  {line}" for line in shown)
+        return lines
+
+    def _print_debug_output(self, result):
+        """Show what a debug task said; a looped one says something per item"""
+        if result._task.action not in self.DEBUG_ACTIONS:
+            return
+        items = result._result.get('results')
+        entries = items if isinstance(items, list) else [result._result]
+        for entry in entries:
+            for line in self._debug_lines(entry):
+                self._display.display(f"{self.DEBUG_INDENT}{line}")
 
     def v2_runner_on_failed(self, result, ignore_errors=False):
         """Called when a task fails"""
@@ -386,15 +430,26 @@ class CallbackModule(CallbackBase):
         except:
             pass
 
+        # A run that left a host failed or unreachable did not succeed.
+        # Failures a task chose to ignore, or that a block rescued, are not counted here.
+        failed = any(stats.summarize(host)['failures'] > 0 or stats.summarize(host)['unreachable'] > 0
+                     for host in hosts)
+
         # Show context-aware completion message
         self._display.display("")
         if 'deploy' in playbook_name:
-            completion_msg = f"🚀 Deployment completed successfully in {total_time:.1f}s"
+            subject = "Deployment"
         elif 'provision' in playbook_name:
-            completion_msg = f"⚙️ Provisioning completed successfully in {total_time:.1f}s"
+            subject = "Provisioning"
         else:
-            completion_msg = f"✅ Playbook completed successfully in {total_time:.1f}s"
+            subject = "Playbook"
 
-        self._display.display(self._colorize(completion_msg, self.colors['success']))
+        if failed:
+            completion_msg = f"❌ {subject} failed after {total_time:.1f}s"
+            self._display.display(self._colorize(completion_msg, self.colors['failed']))
+        else:
+            symbol = {"Deployment": "🚀", "Provisioning": "⚙️"}.get(subject, "✅")
+            completion_msg = f"{symbol} {subject} completed successfully in {total_time:.1f}s"
+            self._display.display(self._colorize(completion_msg, self.colors['success']))
         self._display.display("")
 
